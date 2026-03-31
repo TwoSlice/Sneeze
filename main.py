@@ -26,16 +26,29 @@ SNEEZE_PERSONALITY = (
 )
 
 
+def get_server_context():
+    if not RECENT_MESSAGES:
+        return ""
+    lines = "\n".join(f"- {name}: {msg}" for name, msg in RECENT_MESSAGES[-50:])
+    return (
+        f"\n\nHere is the recent conversation in this server. You've been watching and "
+        f"you remember everything. Use this to reference what people said, call them out, "
+        f"bring up topics they were discussing, roast their takes, and build off the "
+        f"conversation naturally like you've been lurking the whole time:\n{lines}"
+    )
+
+
 async def ask_ai(prompt):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENROUTER_KEY')}",
         "Content-Type": "application/json"
     }
+    server_ctx = get_server_context()
     body = {
         "model": "google/gemini-2.0-flash-001",
         "messages": [
-            {"role": "system", "content": SNEEZE_PERSONALITY},
+            {"role": "system", "content": SNEEZE_PERSONALITY + server_ctx},
             {"role": "user", "content": prompt}
         ]
     }
@@ -60,6 +73,10 @@ HANDLED_MESSAGES = set()
 HANDLED_MAX = 1000
 AI_COOLDOWN = {}
 AI_COOLDOWN_SECONDS = 30
+MARKOV_CHAIN = None
+MARKOV_SAVE_COUNTER = 0
+RECENT_MESSAGES = []
+RECENT_MESSAGES_MAX = 100
 
 
 # ============================================================
@@ -101,6 +118,66 @@ def force_save_levels():
         SAVE_COUNTER = 0
         with open("levels.json", "w") as f:
             json.dump(LEVELS_CACHE, f, indent=4)
+
+
+def load_markov():
+    global MARKOV_CHAIN
+    if MARKOV_CHAIN is not None:
+        return MARKOV_CHAIN
+    try:
+        with open("markov.json", "r") as f:
+            MARKOV_CHAIN = json.load(f)
+    except FileNotFoundError:
+        MARKOV_CHAIN = {}
+    return MARKOV_CHAIN
+
+
+def save_markov():
+    global MARKOV_SAVE_COUNTER
+    MARKOV_SAVE_COUNTER += 1
+    if MARKOV_SAVE_COUNTER >= 20:
+        MARKOV_SAVE_COUNTER = 0
+        if MARKOV_CHAIN is not None:
+            with open("markov.json", "w") as f:
+                json.dump(MARKOV_CHAIN, f)
+
+
+def force_save_markov():
+    global MARKOV_SAVE_COUNTER
+    MARKOV_SAVE_COUNTER = 0
+    if MARKOV_CHAIN is not None:
+        with open("markov.json", "w") as f:
+            json.dump(MARKOV_CHAIN, f)
+
+
+def markov_learn(text):
+    chain = load_markov()
+    words = text.split()
+    if len(words) < 3:
+        return
+    for i in range(len(words) - 2):
+        key = f"{words[i]} {words[i+1]}"
+        if key not in chain:
+            chain[key] = []
+        chain[key].append(words[i+2])
+    save_markov()
+
+
+def markov_generate(max_words=30):
+    chain = load_markov()
+    if not chain:
+        return None
+    key = random.choice(list(chain.keys()))
+    words = key.split()
+    for _ in range(max_words):
+        key = f"{words[-2]} {words[-1]}"
+        if key not in chain:
+            break
+        next_word = random.choice(chain[key])
+        words.append(next_word)
+        if next_word.endswith((".", "!", "?")):
+            break
+    return " ".join(words)
 
 
 def load_config():
@@ -507,12 +584,14 @@ async def on_message(message):
     if len(HANDLED_MESSAGES) > HANDLED_MAX:
         HANDLED_MESSAGES.clear()
 
-    # AI responses when bot is pinged
-    if bot.user.mentioned_in(message) and not message.mention_everyone:
+    # AI responses when bot is pinged (actual @mention in text, not reply mentions)
+    actually_pinged = f"<@{bot.user.id}>" in message.content or f"<@!{bot.user.id}>" in message.content
+    if actually_pinged and not message.mention_everyone:
         now = datetime.datetime.now()
         user_id_ai = str(message.author.id)
         if user_id_ai in AI_COOLDOWN:
             if (now - AI_COOLDOWN[user_id_ai]).total_seconds() < AI_COOLDOWN_SECONDS:
+                await bot.process_commands(message)
                 return
         AI_COOLDOWN[user_id_ai] = now
         # Remove the bot mention from the message to get the actual text
@@ -544,6 +623,14 @@ async def on_message(message):
             ]
             await message.reply(random.choice(empty_pings))
         return
+
+    # Learn from messages
+    if not message.content.startswith(".") and len(message.content.split()) >= 2:
+        RECENT_MESSAGES.append((message.author.display_name, message.content))
+        if len(RECENT_MESSAGES) > RECENT_MESSAGES_MAX:
+            RECENT_MESSAGES.pop(0)
+        if len(message.content.split()) >= 3:
+            markov_learn(message.content)
 
     user_id = str(message.author.id)
     now = datetime.datetime.now()
@@ -1441,5 +1528,6 @@ async def on_command_error(ctx, error):
 
 import atexit
 atexit.register(force_save_levels)
+atexit.register(force_save_markov)
 
 bot.run(os.getenv("DISCORD_TOKEN"))
