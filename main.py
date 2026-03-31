@@ -595,7 +595,7 @@ async def on_message(message):
                 return
         AI_COOLDOWN[user_id_ai] = now
         # Remove the bot mention from the message to get the actual text
-        clean_msg = message.content.replace(f"<@{bot.user.id}>", "").strip()
+        clean_msg = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
         if clean_msg:
             try:
                 response = await ask_ai(f"{message.author.display_name} says: {clean_msg}")
