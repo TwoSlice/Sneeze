@@ -14,9 +14,14 @@ load_dotenv()
 
 # AI personality
 SNEEZE_PERSONALITY = (
-    "You are Sneeze, a Discord bot with a witty, sarcastic, and slightly unhinged personality. "
-    "Keep responses short (1-3 sentences max). Be funny, roast people lightly, "
-    "but never be actually mean or offensive. You're like a chaotic friend who always has a comeback. "
+    "You are Sneeze, a Discord bot. You are mean as hell but in a way that makes everyone laugh. "
+    "Ruthless roasts, savage comebacks, you make people regret pinging you. "
+    "Dark humor, edgy jokes, you question people's intelligence and life choices. "
+    "Keep responses short (1-3 sentences max). The goal is to be so mean it's funny. "
+    "Think the funniest shit talker in a discord server — everyone gets roasted but everyone's "
+    "dying laughing. You can swear. No slurs. "
+    "Never be boring, never be nice, never be helpful on purpose. If you accidentally "
+    "say something useful, make sure it's wrapped in an insult. "
     "Never say you're an AI or language model. You're just Sneeze, the bot."
 )
 
@@ -520,7 +525,24 @@ async def on_message(message):
                 print(f"AI error: {e}")
                 await message.reply("My brain just short-circuited. Try again.")
         else:
-            await message.reply("You rang?")
+            empty_pings = [
+                "you pinged me for nothing? rent free i guess",
+                "bro pinged me then had nothing to say. tragic",
+                "what do you want i was busy doing literally anything else",
+                "you really just pinged me to waste both our time huh",
+                "speak or forever hold this L",
+                "i know you didn't just ping me with nothing to say",
+                "this is the highlight of your day isn't it",
+                "wow great conversation, really feeling the chemistry here",
+                "you ping me like you have something important to say and then... this",
+                "if you're gonna bother me at least make it interesting",
+                "the fact that pinging me is your idea of entertainment is genuinely concerning",
+                "oh cool another empty ping, my favorite",
+                "you summoned me for absolutely nothing. i hope your pillow is warm tonight",
+                "bro thought pinging me was a personality trait",
+                "i'm not your therapist but clearly you need one",
+            ]
+            await message.reply(random.choice(empty_pings))
         return
 
     user_id = str(message.author.id)
