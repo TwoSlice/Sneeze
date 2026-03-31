@@ -51,6 +51,8 @@ VC_TRACKING = {}
 ACTIVE_VCS = {}  # channel_id: {"owner": user_id, "locked": False, "banned": []}
 INVITE_CACHE = {}  # guild_id: {invite_code: uses}
 INVITE_TRACKER_CHANNEL = 1478778935746756739
+HANDLED_MESSAGES = set()
+HANDLED_MAX = 1000
 
 
 # ============================================================
@@ -490,6 +492,13 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
+
+    # Prevent duplicate processing from overlapping instances
+    if message.id in HANDLED_MESSAGES:
+        return
+    HANDLED_MESSAGES.add(message.id)
+    if len(HANDLED_MESSAGES) > HANDLED_MAX:
+        HANDLED_MESSAGES.clear()
 
     # AI responses when bot is pinged
     if bot.user.mentioned_in(message) and not message.mention_everyone:
