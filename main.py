@@ -7,50 +7,108 @@ import random
 import datetime
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
+import aiohttp as _aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.voice_states = True
+# AI personality
+SNEEZE_PERSONALITY = (
+    "You are Sneeze, a Discord bot with a witty, sarcastic, and slightly unhinged personality. "
+    "Keep responses short (1-3 sentences max). Be funny, roast people lightly, "
+    "but never be actually mean or offensive. You're like a chaotic friend who always has a comeback. "
+    "Never say you're an AI or language model. You're just Sneeze, the bot."
+)
 
-bot = commands.Bot(command_prefix=".", intents=intents, help_command=None)
+
+async def ask_ai(prompt):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_KEY')}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "model": "google/gemini-2.0-flash-001",
+        "messages": [
+            {"role": "system", "content": SNEEZE_PERSONALITY},
+            {"role": "user", "content": prompt}
+        ]
+    }
+    async with _aiohttp.ClientSession() as session:
+        async with session.post(url, json=body, headers=headers) as resp:
+            data = await resp.json()
+            print(f"AI response: {data}")
+            return data["choices"][0]["message"]["content"]
+
+intents = discord.Intents.all()
+
+bot = commands.Bot(command_prefix=".", intents=intents, help_command=None, member_cache_flags=discord.MemberCacheFlags.all())
 
 # ---------- GLOBALS ----------
 COOLDOWN_SECONDS = 60
 XP_COOLDOWN = {}
 VC_TRACKING = {}
 ACTIVE_VCS = {}  # channel_id: {"owner": user_id, "locked": False, "banned": []}
+INVITE_CACHE = {}  # guild_id: {invite_code: uses}
+INVITE_TRACKER_CHANNEL = 1478778935746756739
 
 
 # ============================================================
 #  DATA HELPERS
 # ============================================================
 
+# In-memory caches
+LEVELS_CACHE = None
+CONFIG_CACHE = None
+SAVE_COUNTER = 0
+
+
 def load_levels():
+    global LEVELS_CACHE
+    if LEVELS_CACHE is not None:
+        return LEVELS_CACHE
     try:
         with open("levels.json", "r") as f:
-            return json.load(f)
+            LEVELS_CACHE = json.load(f)
     except FileNotFoundError:
-        return {}
+        LEVELS_CACHE = {}
+    return LEVELS_CACHE
 
 
 def save_levels(data):
-    with open("levels.json", "w") as f:
-        json.dump(data, f, indent=4)
+    global LEVELS_CACHE, SAVE_COUNTER
+    LEVELS_CACHE = data
+    SAVE_COUNTER += 1
+    # Only write to disk every 10 updates to reduce I/O
+    if SAVE_COUNTER >= 10:
+        SAVE_COUNTER = 0
+        with open("levels.json", "w") as f:
+            json.dump(data, f, indent=4)
+
+
+def force_save_levels():
+    global SAVE_COUNTER
+    if LEVELS_CACHE is not None:
+        SAVE_COUNTER = 0
+        with open("levels.json", "w") as f:
+            json.dump(LEVELS_CACHE, f, indent=4)
 
 
 def load_config():
+    global CONFIG_CACHE
+    if CONFIG_CACHE is not None:
+        return CONFIG_CACHE
     try:
         with open("config.json", "r") as f:
-            return json.load(f)
+            CONFIG_CACHE = json.load(f)
     except FileNotFoundError:
-        return {}
+        CONFIG_CACHE = {}
+    return CONFIG_CACHE
 
 
 def save_config(data):
+    global CONFIG_CACHE
+    CONFIG_CACHE = data
     with open("config.json", "w") as f:
         json.dump(data, f, indent=4)
 
@@ -119,79 +177,19 @@ def make_progress_bar(progress, length=10):
     return "**" + "\u2588" * filled + "**" + "\u2591" * empty
 
 
-async def generate_levelup_card(member, new_level, old_level, total_xp):
-    green = (26, 80, 26)  # #1a501a
-    light_green = (40, 130, 40)
-    dark_bg = (32, 34, 37)
-    card_bg = (43, 45, 49)
-    white = (255, 255, 255)
-    grey = (180, 180, 180)
-    dim = (130, 130, 130)
-
-    width = 400
-    height = 130
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    # Card background
-    draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=12, fill=card_bg)
-
-    font_name = get_font(16)
-    font_level_tag = get_font(13)
-    font_detail = get_font(13)
-    font_small = get_font(12)
-
-    # Avatar on right side - clear of all text
-    avatar_size = 56
-    avatar_bytes = await member.display_avatar.with_size(128).read()
-    avatar_img = Image.open(BytesIO(avatar_bytes)).resize((avatar_size, avatar_size)).convert("RGBA")
-
-    mask = Image.new("L", (avatar_size, avatar_size), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
-
-    avatar_x = width - avatar_size - 20
-    avatar_y = 15
-
-    # Green ring
-    ring_pad = 3
-    draw.ellipse((avatar_x - ring_pad, avatar_y - ring_pad, avatar_x + avatar_size + ring_pad, avatar_y + avatar_size + ring_pad), fill=green)
-    draw.ellipse((avatar_x - 1, avatar_y - 1, avatar_x + avatar_size + 1, avatar_y + avatar_size + 1), fill=card_bg)
-    img.paste(avatar_img, (avatar_x, avatar_y), mask)
-
-    # All text stays left of avatar
-    text_x = 18
-    max_text_x = avatar_x - 15
-
-    # Name + Level
-    draw.text((text_x, 12), member.display_name, fill=white, font=font_name)
-    name_w = draw.textlength(member.display_name, font=font_name)
-    draw.text((text_x + name_w + 6, 14), f"Level {new_level}", fill=grey, font=font_level_tag)
-
-    # Green divider
-    draw.rectangle((text_x, 35, max_text_x, 36), fill=green)
-
-    # Level up text
-    draw.text((text_x, 44), f"@{member.display_name} is now ", fill=grey, font=font_detail)
-    now_w = draw.textlength(f"@{member.display_name} is now ", font=font_detail)
-    draw.text((text_x + now_w, 44), f"Level {new_level}", fill=light_green, font=font_detail)
-
-    # Details
-    draw.text((text_x, 66), "Previous:", fill=dim, font=font_small)
-    pw = draw.textlength("Previous: ", font=font_small)
-    draw.text((text_x + pw, 66), f"Level {old_level}", fill=grey, font=font_small)
-
-    draw.text((text_x, 84), "Total XP:", fill=dim, font=font_small)
-    xw = draw.textlength("Total XP: ", font=font_small)
-    draw.text((text_x + xw, 84), f"{total_xp}", fill=grey, font=font_small)
-
-    # Convert to RGB
-    final = Image.new("RGB", (width, height), dark_bg)
-    final.paste(img, (0, 0), img)
-
-    buffer = BytesIO()
-    final.save(buffer, "PNG")
-    buffer.seek(0)
-    return discord.File(buffer, filename="levelup.png")
+def build_levelup_embed(member, new_level, old_level, total_xp):
+    theme = discord.Color.from_str("#1a501a")
+    embed = discord.Embed(
+        description=(
+            f"@{member.display_name} is now **Level {new_level}**\n"
+            f"\u2022 Previous: **Level {old_level}**\n"
+            f"\u2022 Total XP: **{total_xp}**"
+        ),
+        color=theme
+    )
+    embed.set_author(name=f"{member.display_name}  \u2022  Level {new_level}", icon_url=member.display_avatar.url)
+    embed.set_thumbnail(url=member.display_avatar.with_size(256).url)
+    return embed
 
 
 # ============================================================
@@ -235,7 +233,7 @@ class HelpDropdown(ui.Select):
                 "**.ping**\n> Show bot latency.\n\n"
                 "**.xp `[@user]`**\n> Show your XP.\n\n"
                 "**.lb**\n> Show the leaderboard.\n\n"
-                "**.avatar `[@user]`**\n> Show a user avatar.\n\n"
+                "**.av `[@user]`**\n> Show a user avatar.\n\n"
                 "**.userinfo `[@user]`**\n> Show user information.\n\n"
                 "**.serverinfo**\n> Show server information.\n\n"
                 "**.membercount**\n> Show member counts.\n\n"
@@ -476,7 +474,14 @@ async def log_action(guild, action):
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
+    # Cache invites for tracking
+    for guild in bot.guilds:
+        try:
+            invites = await guild.invites()
+            INVITE_CACHE[guild.id] = {inv.code: inv.uses for inv in invites}
+        except discord.HTTPException:
+            INVITE_CACHE[guild.id] = {}
+
     print(f"Logged on as {bot.user}!")
 
 
@@ -484,6 +489,21 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # AI responses when bot is pinged
+    if bot.user.mentioned_in(message) and not message.mention_everyone:
+        # Remove the bot mention from the message to get the actual text
+        clean_msg = message.content.replace(f"<@{bot.user.id}>", "").strip()
+        if clean_msg:
+            try:
+                response = await ask_ai(f"{message.author.display_name} says: {clean_msg}")
+                await message.reply(response[:2000])
+            except Exception as e:
+                print(f"AI error: {e}")
+                await message.reply("My brain just short-circuited. Try again.")
+        else:
+            await message.reply("You rang?")
         return
 
     user_id = str(message.author.id)
@@ -540,8 +560,8 @@ async def on_message(message):
         levels[user_id]["level"] += 1
         new_level = levels[user_id]["level"]
 
-        file = await generate_levelup_card(message.author, new_level, old_level, levels[user_id]["xp"])
-        await message.channel.send(file=file)
+        embed = build_levelup_embed(message.author, new_level, old_level, levels[user_id]["xp"])
+        await message.channel.send(embed=embed)
 
     save_levels(levels)
     await bot.process_commands(message)
@@ -565,6 +585,7 @@ async def on_voice_state_update(member, before, after):
             levels = ensure_user(levels, user_id)
             levels[user_id]["vc_minutes"] += minutes
             save_levels(levels)
+            force_save_levels()
 
     # Join to Create
     j2c_id = cfg.get("j2c_channel")
@@ -598,14 +619,287 @@ async def on_voice_state_update(member, before, after):
 
         view = VCControlView(new_vc, member)
 
-        # Send in the VC's built-in text chat
-        await new_vc.send(embed=embed, view=view)
+        # Send in the VC's built-in text chat (small delay to let it initialize)
+        await discord.utils.sleep_until(datetime.datetime.now() + datetime.timedelta(seconds=1))
+        try:
+            await new_vc.send(embed=embed, view=view)
+        except discord.HTTPException:
+            pass
 
     # Delete empty J2C VCs
     if before.channel and before.channel.id in ACTIVE_VCS:
         if len(before.channel.members) == 0:
             del ACTIVE_VCS[before.channel.id]
-            await before.channel.delete(reason="Empty J2C VC")
+            try:
+                await before.channel.delete(reason="Empty J2C VC")
+            except discord.HTTPException:
+                pass
+
+    # Also clean up any VC in the J2C category that's empty and not the J2C channel itself
+    j2c_id = cfg.get("j2c_channel")
+    if before.channel and j2c_id and str(before.channel.id) != str(j2c_id):
+        if before.channel.category and len(before.channel.members) == 0:
+            j2c_channel = member.guild.get_channel(int(j2c_id))
+            if j2c_channel and before.channel.category == j2c_channel.category:
+                if before.channel.id not in ACTIVE_VCS:
+                    try:
+                        await before.channel.delete(reason="Empty J2C VC (cleanup)")
+                    except discord.HTTPException:
+                        pass
+
+    # --- VC Logging ---
+    log_ch = member.guild.get_channel(1478778935746756738)
+    if log_ch:
+        theme = discord.Color.from_str("#1a501a")
+        if before.channel is None and after.channel is not None:
+            embed = discord.Embed(description=f"{member.mention} joined voice channel **{after.channel.name}**", color=theme, timestamp=datetime.datetime.now())
+            embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+            embed.set_footer(text="VC Join")
+            await log_ch.send(embed=embed)
+        elif before.channel is not None and after.channel is None:
+            embed = discord.Embed(description=f"{member.mention} left voice channel **{before.channel.name}**", color=discord.Color.from_str("#8B0000"), timestamp=datetime.datetime.now())
+            embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+            embed.set_footer(text="VC Leave")
+            await log_ch.send(embed=embed)
+        elif before.channel is not None and after.channel is not None and before.channel != after.channel:
+            embed = discord.Embed(description=f"{member.mention} moved from **{before.channel.name}** to **{after.channel.name}**", color=theme, timestamp=datetime.datetime.now())
+            embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+            embed.set_footer(text="VC Move")
+            await log_ch.send(embed=embed)
+
+
+# ============================================================
+#  DETAILED LOGGING
+# ============================================================
+
+LOG_CHANNEL_ID = 1478778935746756738
+
+
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot or not message.guild:
+        return
+    log_ch = message.guild.get_channel(LOG_CHANNEL_ID)
+    if not log_ch:
+        return
+    embed = discord.Embed(
+        description=f"**Message deleted in** {message.channel.mention}\n\n{message.content}" if message.content else f"**Message deleted in** {message.channel.mention}\n\n*[no text content]*",
+        color=discord.Color.from_str("#8B0000"),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
+    if message.attachments:
+        filenames = ", ".join(a.filename for a in message.attachments)
+        embed.add_field(name="Attachments", value=filenames, inline=False)
+    embed.set_footer(text=f"Author ID: {message.author.id}")
+    await log_ch.send(embed=embed)
+
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot or not before.guild:
+        return
+    if before.content == after.content:
+        return
+    log_ch = before.guild.get_channel(LOG_CHANNEL_ID)
+    if not log_ch:
+        return
+    embed = discord.Embed(
+        description=f"**Message edited in** {before.channel.mention} [Jump]({after.jump_url})",
+        color=discord.Color.from_str("#b58900"),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_author(name=before.author.display_name, icon_url=before.author.display_avatar.url)
+    before_text = before.content[:1000] if before.content else "*[empty]*"
+    after_text = after.content[:1000] if after.content else "*[empty]*"
+    embed.add_field(name="Before", value=before_text, inline=False)
+    embed.add_field(name="After", value=after_text, inline=False)
+    embed.set_footer(text=f"Author ID: {before.author.id}")
+    await log_ch.send(embed=embed)
+
+
+@bot.event
+async def on_member_join(member):
+    # --- Invite Tracking ---
+    inviter = None
+    invite_code = None
+    invite_ch = member.guild.get_channel(INVITE_TRACKER_CHANNEL)
+    try:
+        current_invites = await member.guild.invites()
+        old_invites = INVITE_CACHE.get(member.guild.id, {})
+
+        for inv in current_invites:
+            old_uses = old_invites.get(inv.code, 0)
+            if inv.uses > old_uses:
+                inviter = inv.inviter
+                invite_code = inv.code
+                break
+
+        INVITE_CACHE[member.guild.id] = {inv.code: inv.uses for inv in current_invites}
+    except discord.HTTPException:
+        pass
+
+    if invite_ch:
+        theme = discord.Color.from_str("#1a501a")
+        if inviter:
+            inv_embed = discord.Embed(
+                description=(
+                    f"{member.mention} joined the server\n\n"
+                    f"**Invited by:** {inviter.mention}\n"
+                    f"**Invite Code:** `{invite_code}`\n"
+                    f"**Account Created:** <t:{int(member.created_at.timestamp())}:R>"
+                ),
+                color=theme,
+                timestamp=datetime.datetime.now()
+            )
+        else:
+            inv_embed = discord.Embed(
+                description=(
+                    f"{member.mention} joined the server\n\n"
+                    f"**Invited by:** Unknown (vanity or expired invite)\n"
+                    f"**Account Created:** <t:{int(member.created_at.timestamp())}:R>"
+                ),
+                color=theme,
+                timestamp=datetime.datetime.now()
+            )
+        inv_embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        inv_embed.set_footer(text=f"Member #{member.guild.member_count} | ID: {member.id}")
+        await invite_ch.send(embed=inv_embed)
+
+    # --- General Log ---
+    log_ch = member.guild.get_channel(LOG_CHANNEL_ID)
+    if log_ch:
+        embed = discord.Embed(
+            description=f"{member.mention} joined the server\n\nAccount created: <t:{int(member.created_at.timestamp())}:R>",
+            color=discord.Color.from_str("#1a501a"),
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        embed.set_footer(text=f"Member #{member.guild.member_count} | ID: {member.id}")
+        await log_ch.send(embed=embed)
+
+
+@bot.event
+async def on_member_remove(member):
+    log_ch = member.guild.get_channel(LOG_CHANNEL_ID)
+    if not log_ch:
+        return
+    roles = [r.mention for r in member.roles if r != member.guild.default_role]
+    embed = discord.Embed(
+        description=f"{member.mention} left the server",
+        color=discord.Color.from_str("#8B0000"),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+    if roles:
+        embed.add_field(name="Roles", value=", ".join(roles[:15]), inline=False)
+    embed.set_footer(text=f"ID: {member.id}")
+    await log_ch.send(embed=embed)
+
+
+@bot.event
+async def on_invite_create(invite):
+    try:
+        invites = await invite.guild.invites()
+        INVITE_CACHE[invite.guild.id] = {inv.code: inv.uses for inv in invites}
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
+async def on_invite_delete(invite):
+    try:
+        invites = await invite.guild.invites()
+        INVITE_CACHE[invite.guild.id] = {inv.code: inv.uses for inv in invites}
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
+async def on_member_update(before, after):
+    log_ch = before.guild.get_channel(LOG_CHANNEL_ID)
+    if not log_ch:
+        return
+
+    # Nickname change
+    if before.nick != after.nick:
+        embed = discord.Embed(
+            description=f"{after.mention} nickname changed",
+            color=discord.Color.from_str("#b58900"),
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_author(name=after.display_name, icon_url=after.display_avatar.url)
+        embed.add_field(name="Before", value=before.nick or "*None*", inline=True)
+        embed.add_field(name="After", value=after.nick or "*None*", inline=True)
+        embed.set_footer(text=f"ID: {after.id}")
+        await log_ch.send(embed=embed)
+
+    # Role changes
+    if before.roles != after.roles:
+        added = [r.mention for r in after.roles if r not in before.roles]
+        removed = [r.mention for r in before.roles if r not in after.roles]
+        embed = discord.Embed(
+            description=f"{after.mention} roles updated",
+            color=discord.Color.from_str("#1a501a"),
+            timestamp=datetime.datetime.now()
+        )
+        embed.set_author(name=after.display_name, icon_url=after.display_avatar.url)
+        if added:
+            embed.add_field(name="Added", value=", ".join(added), inline=False)
+        if removed:
+            embed.add_field(name="Removed", value=", ".join(removed), inline=False)
+        embed.set_footer(text=f"ID: {after.id}")
+        await log_ch.send(embed=embed)
+
+
+@bot.event
+async def on_member_ban(guild, user):
+    log_ch = guild.get_channel(LOG_CHANNEL_ID)
+    if not log_ch:
+        return
+    embed = discord.Embed(
+        description=f"**{user}** was banned",
+        color=discord.Color.from_str("#8B0000"),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+    embed.set_footer(text=f"ID: {user.id}")
+    await log_ch.send(embed=embed)
+
+
+@bot.event
+async def on_member_unban(guild, user):
+    log_ch = guild.get_channel(LOG_CHANNEL_ID)
+    if not log_ch:
+        return
+    embed = discord.Embed(
+        description=f"**{user}** was unbanned",
+        color=discord.Color.from_str("#1a501a"),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+    embed.set_footer(text=f"ID: {user.id}")
+    await log_ch.send(embed=embed)
+
+
+@bot.event
+async def on_bulk_message_delete(messages):
+    if not messages:
+        return
+    guild = messages[0].guild
+    if not guild:
+        return
+    log_ch = guild.get_channel(LOG_CHANNEL_ID)
+    if not log_ch:
+        return
+    channel = messages[0].channel
+    embed = discord.Embed(
+        description=f"**{len(messages)} messages** bulk deleted in {channel.mention}",
+        color=discord.Color.from_str("#8B0000"),
+        timestamp=datetime.datetime.now()
+    )
+    embed.set_footer(text="Bulk Delete")
+    await log_ch.send(embed=embed)
 
 
 # ============================================================
@@ -627,7 +921,7 @@ async def help_cmd(ctx):
     )
     embed.set_author(name=bot.user.display_name, icon_url=bot.user.display_avatar.url)
     embed.set_thumbnail(url=bot.user.display_avatar.url)
-    await ctx.send(embed=embed, view=HelpView())
+    await ctx.reply(embed=embed, view=HelpView(), mention_author=True)
 
 
 @bot.command(name="ping")
@@ -635,7 +929,7 @@ async def ping(ctx):
     theme = discord.Color.from_str("#1a501a")
     latency = round(bot.latency * 1000)
     embed = discord.Embed(description=f"Pong! **{latency}ms**", color=theme)
-    await ctx.send(embed=embed)
+    await ctx.reply(embed=embed, mention_author=False)
 
 
 @bot.command(name="xp")
@@ -645,13 +939,18 @@ async def xp(ctx, member: discord.Member = None):
     user_id = str(member.id)
 
     if user_id not in levels:
-        await ctx.send(f"**{member.display_name}** has no XP yet.")
+        await ctx.reply(f"**{member.display_name}** has no XP yet.", mention_author=False)
         return
 
     data = levels[user_id]
     needed = xp_needed(data["level"] + 1)
     rank = get_rank(user_id, levels)
-    vc_hours = round(data.get("vc_minutes", 0) / 60, 1)
+    # Include live VC time if currently in a voice channel
+    total_vc_minutes = data.get("vc_minutes", 0)
+    if user_id in VC_TRACKING:
+        live_minutes = (datetime.datetime.now() - VC_TRACKING[user_id]).total_seconds() / 60
+        total_vc_minutes += live_minutes
+    vc_hours = round(total_vc_minutes / 60, 1)
     progress = min(data["xp"] / needed, 1.0) if needed > 0 else 1
     percentage = int(progress * 100)
     xp_remaining = needed - data["xp"]
@@ -668,14 +967,14 @@ async def xp(ctx, member: discord.Member = None):
 
     embed.add_field(name="Progress", value=f"{bar}\n**{percentage}%**\nXP to Next: **{xp_remaining}**", inline=False)
 
-    await ctx.send(embed=embed)
+    await ctx.reply(embed=embed, mention_author=True)
 
 
 @bot.command(name="lb")
 async def lb(ctx):
     levels = load_levels()
     if not levels:
-        await ctx.send("No one has any XP yet!")
+        await ctx.reply("No one has any XP yet!", mention_author=False)
         return
 
     sorted_users = sorted(levels.items(), key=lambda x: x[1]["xp"], reverse=True)[:10]
@@ -691,16 +990,16 @@ async def lb(ctx):
     theme = discord.Color.from_str("#1a501a")
     embed = discord.Embed(title="Leaderboard", description=description, color=theme)
     embed.set_footer(text=f"{ctx.guild.name} Rankings")
-    await ctx.send(embed=embed)
+    await ctx.reply(embed=embed, mention_author=False)
 
 
-@bot.command(name="avatar")
+@bot.command(name="av")
 async def avatar(ctx, member: discord.Member = None):
     theme = discord.Color.from_str("#1a501a")
     member = member or ctx.author
     embed = discord.Embed(title=f"{member.display_name}'s Avatar", color=theme)
     embed.set_image(url=member.display_avatar.with_size(512).url)
-    await ctx.send(embed=embed)
+    await ctx.reply(embed=embed, mention_author=False)
 
 
 @bot.command(name="userinfo")
@@ -719,27 +1018,32 @@ async def userinfo(ctx, member: discord.Member = None):
     embed.add_field(name="\u200b", value="\u200b", inline=True)
     embed.add_field(name="Top Role", value=member.top_role.mention, inline=True)
     embed.add_field(name=f"Roles [{len(roles)}]", value=", ".join(roles[:10]) + ("..." if len(roles) > 10 else "") if roles else "None", inline=False)
-    await ctx.send(embed=embed)
+    await ctx.reply(embed=embed, mention_author=False)
 
 
 @bot.command(name="serverinfo")
 async def serverinfo(ctx):
     theme = discord.Color.from_str("#1a501a")
     guild = ctx.guild
-    embed = discord.Embed(color=theme)
-    embed.set_author(name=guild.name, icon_url=guild.icon.url if guild.icon else None)
+    owner_id = guild.owner_id if guild.owner_id else "Unknown"
+    total_channels = len(guild.text_channels) + len(guild.voice_channels)
+    created = guild.created_at.strftime("%A, %B %d, %Y %I:%M %p")
+
+    embed = discord.Embed(title="server information", color=theme)
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
-    embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
-    embed.add_field(name="Members", value=f"`{guild.member_count}`", inline=True)
-    embed.add_field(name="Roles", value=f"`{len(guild.roles)}`", inline=True)
-    embed.add_field(name="Text Channels", value=f"`{len(guild.text_channels)}`", inline=True)
-    embed.add_field(name="Voice Channels", value=f"`{len(guild.voice_channels)}`", inline=True)
-    embed.add_field(name="Created", value=f"<t:{int(guild.created_at.timestamp())}:R>", inline=True)
-    embed.add_field(name="Boost Level", value=f"`{guild.premium_tier}`", inline=True)
-    embed.add_field(name="Boosts", value=f"`{guild.premium_subscription_count}`", inline=True)
-    embed.add_field(name="\u200b", value="\u200b", inline=True)
-    await ctx.send(embed=embed)
+
+    embed.add_field(name="name", value=guild.name, inline=True)
+    embed.add_field(name="id", value=str(guild.id), inline=True)
+    embed.add_field(name="owner id", value=str(owner_id), inline=True)
+
+    embed.add_field(name="members", value=str(guild.member_count), inline=True)
+    embed.add_field(name="channels", value=str(total_channels), inline=True)
+    embed.add_field(name="roles", value=str(len(guild.roles)), inline=True)
+
+    embed.add_field(name="created", value=f"<t:{int(guild.created_at.timestamp())}:F>", inline=False)
+
+    await ctx.reply(embed=embed, mention_author=False)
 
 
 @bot.command(name="membercount")
@@ -748,21 +1052,19 @@ async def membercount(ctx):
     total = guild.member_count
     bots = sum(1 for m in guild.members if m.bot)
     humans = total - bots
-    online = sum(1 for m in guild.members if m.status != discord.Status.offline)
 
     theme = discord.Color.from_str("#1a501a")
     embed = discord.Embed(title="Member Count", color=theme)
     embed.add_field(name="Total", value=f"`{total}`", inline=True)
     embed.add_field(name="Humans", value=f"`{humans}`", inline=True)
     embed.add_field(name="Bots", value=f"`{bots}`", inline=True)
-    embed.add_field(name="Online", value=f"`{online}`", inline=True)
-    await ctx.send(embed=embed)
+    await ctx.reply(embed=embed, mention_author=False)
 
 
 @bot.command(name="roleinfo")
 async def roleinfo(ctx, role: discord.Role = None):
     if not role:
-        await ctx.send("Please provide a role. Usage: `.roleinfo @role`")
+        await ctx.reply("Please provide a role. Usage: `.roleinfo @role`", mention_author=False)
         return
     theme = discord.Color.from_str("#1a501a")
     embed = discord.Embed(title=role.name, color=role.color if role.color.value != 0 else theme)
@@ -773,24 +1075,30 @@ async def roleinfo(ctx, role: discord.Role = None):
     embed.add_field(name="Hoisted", value=f"`{role.hoist}`", inline=True)
     embed.add_field(name="Position", value=f"`{role.position}`", inline=True)
     embed.add_field(name="Created", value=f"<t:{int(role.created_at.timestamp())}:R>", inline=True)
-    await ctx.send(embed=embed)
+    await ctx.reply(embed=embed, mention_author=False)
 
 
 # ============================================================
 #  SETUP COMMANDS (Admin only)
 # ============================================================
 
-async def send_confirm(ctx, message):
+async def send_confirm(ctx, message, delete_after=None):
     theme = discord.Color.from_str("#1a501a")
     embed = discord.Embed(description=message, color=theme)
-    await ctx.send(embed=embed)
+    msg = await ctx.reply(embed=embed, mention_author=False)
+    if delete_after:
+        try:
+            await ctx.message.delete(delay=1)
+            await msg.delete(delay=delete_after)
+        except discord.HTTPException:
+            pass
 
 
 @bot.command(name="setjail")
 @commands.has_permissions(administrator=True)
 async def setjail(ctx, role: discord.Role):
     update_guild_config(ctx.guild.id, "jail_role", str(role.id))
-    await send_confirm(ctx, f"Jail role set to {role.mention}.")
+    await send_confirm(ctx, f"Jail role set to {role.mention}.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} set jail role to {role.mention}")
 
 
@@ -798,7 +1106,7 @@ async def setjail(ctx, role: discord.Role):
 @commands.has_permissions(administrator=True)
 async def setir(ctx, role: discord.Role):
     update_guild_config(ctx.guild.id, "ir_role", str(role.id))
-    await send_confirm(ctx, f"Image restriction role set to {role.mention}.")
+    await send_confirm(ctx, f"Image restriction role set to {role.mention}.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} set IR role to {role.mention}")
 
 
@@ -806,7 +1114,7 @@ async def setir(ctx, role: discord.Role):
 @commands.has_permissions(administrator=True)
 async def setbooster(ctx, role: discord.Role):
     update_guild_config(ctx.guild.id, "booster_role", str(role.id))
-    await send_confirm(ctx, f"Booster role set to {role.mention}.")
+    await send_confirm(ctx, f"Booster role set to {role.mention}.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} set booster role to {role.mention}")
 
 
@@ -814,7 +1122,7 @@ async def setbooster(ctx, role: discord.Role):
 @commands.has_permissions(administrator=True)
 async def setj2c(ctx, channel: discord.VoiceChannel):
     update_guild_config(ctx.guild.id, "j2c_channel", str(channel.id))
-    await send_confirm(ctx, f"Join-to-create channel set to {channel.mention}.")
+    await send_confirm(ctx, f"Join-to-create channel set to {channel.mention}.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} set J2C channel to {channel.mention}")
 
 
@@ -822,7 +1130,7 @@ async def setj2c(ctx, channel: discord.VoiceChannel):
 @commands.has_permissions(administrator=True)
 async def setimglevel(ctx, level: int):
     update_guild_config(ctx.guild.id, "image_level", level)
-    await send_confirm(ctx, f"Image permission level set to `{level}`.")
+    await send_confirm(ctx, f"Image permission level set to `{level}`.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} set image level to {level}")
 
 
@@ -830,7 +1138,7 @@ async def setimglevel(ctx, level: int):
 @commands.has_permissions(administrator=True)
 async def setlogs(ctx, channel: discord.TextChannel):
     update_guild_config(ctx.guild.id, "log_channel", str(channel.id))
-    await send_confirm(ctx, f"Log channel set to {channel.mention}.")
+    await send_confirm(ctx, f"Log channel set to {channel.mention}.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} set log channel to {channel.mention}")
 
 
@@ -843,18 +1151,18 @@ async def setlogs(ctx, channel: discord.TextChannel):
 async def jm(ctx, member: discord.Member):
     cfg = get_guild_config(ctx.guild.id)
     if not cfg.get("jail_role"):
-        await send_confirm(ctx, "Jail role not set. Use `.setjail @role` first.")
+        await send_confirm(ctx, "Jail role not set. Use `.setjail @role` first.", delete_after=5)
         return
     role = ctx.guild.get_role(int(cfg["jail_role"]))
     if not role:
-        await send_confirm(ctx, "Jail role not found.")
+        await send_confirm(ctx, "Jail role not found.", delete_after=5)
         return
     if role in member.roles:
         await member.remove_roles(role)
-        await send_confirm(ctx, f"Removed jail role from {member.mention}.")
+        await send_confirm(ctx, f"Removed jail role from {member.mention}.", delete_after=5)
     else:
         await member.add_roles(role)
-        await send_confirm(ctx, f"Added jail role to {member.mention}.")
+        await send_confirm(ctx, f"Added jail role to {member.mention}.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} toggled jail on {member.mention}")
 
 
@@ -863,18 +1171,18 @@ async def jm(ctx, member: discord.Member):
 async def ir(ctx, member: discord.Member):
     cfg = get_guild_config(ctx.guild.id)
     if not cfg.get("ir_role"):
-        await send_confirm(ctx, "IR role not set. Use `.setir @role` first.")
+        await send_confirm(ctx, "IR role not set. Use `.setir @role` first.", delete_after=5)
         return
     role = ctx.guild.get_role(int(cfg["ir_role"]))
     if not role:
-        await send_confirm(ctx, "IR role not found.")
+        await send_confirm(ctx, "IR role not found.", delete_after=5)
         return
     if role in member.roles:
         await member.remove_roles(role)
-        await send_confirm(ctx, f"Removed image restriction from {member.mention}.")
+        await send_confirm(ctx, f"Removed image restriction from {member.mention}.", delete_after=5)
     else:
         await member.add_roles(role)
-        await send_confirm(ctx, f"Added image restriction to {member.mention}.")
+        await send_confirm(ctx, f"Added image restriction to {member.mention}.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} toggled IR on {member.mention}")
 
 
@@ -884,12 +1192,12 @@ async def to_cmd(ctx, member: discord.Member, minutes: int = None):
     cfg = get_guild_config(ctx.guild.id)
     if member.is_timed_out():
         await member.timeout(None)
-        await send_confirm(ctx, f"Removed timeout from {member.mention}.")
+        await send_confirm(ctx, f"Removed timeout from {member.mention}.", delete_after=5)
     else:
         mins = minutes or cfg.get("default_timeout", 10)
         duration = datetime.timedelta(minutes=mins)
         await member.timeout(duration)
-        await send_confirm(ctx, f"Timed out {member.mention} for `{mins}` minutes.")
+        await send_confirm(ctx, f"Timed out {member.mention} for `{mins}` minutes.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} toggled timeout on {member.mention}")
 
 
@@ -916,9 +1224,9 @@ async def lq(ctx):
             await msg.delete()
             await ctx.message.delete()
         except discord.NotFound:
-            await send_confirm(ctx, "Message not found.")
+            await send_confirm(ctx, "Message not found.", delete_after=5)
     else:
-        await send_confirm(ctx, "Reply to a message to use `.lq`.")
+        await send_confirm(ctx, "Reply to a message to use `.lq`.", delete_after=5)
 
 
 @bot.command(name="banvc")
@@ -930,10 +1238,10 @@ async def banvc(ctx, member: discord.Member):
             ACTIVE_VCS[vc_id]["banned"].append(member.id)
         await member.voice.channel.set_permissions(member, connect=False)
         await member.move_to(None)
-        await send_confirm(ctx, f"{member.mention} has been banned from the VC.")
+        await send_confirm(ctx, f"{member.mention} has been banned from the VC.", delete_after=5)
         await log_action(ctx.guild, f"{ctx.author.mention} VC banned {member.mention}")
     else:
-        await send_confirm(ctx, "That user is not in a voice channel.")
+        await send_confirm(ctx, "That user is not in a voice channel.", delete_after=5)
 
 
 @bot.command(name="unbanvc")
@@ -945,7 +1253,7 @@ async def unbanvc(ctx, member: discord.Member):
             channel = ctx.guild.get_channel(vc_id)
             if channel:
                 await channel.set_permissions(member, overwrite=None)
-    await send_confirm(ctx, f"Removed VC ban from {member.mention}.")
+    await send_confirm(ctx, f"Removed VC ban from {member.mention}.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} removed VC ban from {member.mention}")
 
 
@@ -953,7 +1261,7 @@ async def unbanvc(ctx, member: discord.Member):
 @commands.has_permissions(administrator=True)
 async def lock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await send_confirm(ctx, "This channel has been locked.")
+    await send_confirm(ctx, "This channel has been locked.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} locked {ctx.channel.mention}")
 
 
@@ -961,7 +1269,7 @@ async def lock(ctx):
 @commands.has_permissions(administrator=True)
 async def unlock(ctx):
     await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
-    await send_confirm(ctx, "This channel has been unlocked.")
+    await send_confirm(ctx, "This channel has been unlocked.", delete_after=5)
     await log_action(ctx.guild, f"{ctx.author.mention} unlocked {ctx.channel.mention}")
 
 
@@ -1091,5 +1399,8 @@ async def on_command_error(ctx, error):
     else:
         print(f"Error: {error}")
 
+
+import atexit
+atexit.register(force_save_levels)
 
 bot.run(os.getenv("DISCORD_TOKEN"))
