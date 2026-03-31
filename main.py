@@ -53,6 +53,8 @@ INVITE_CACHE = {}  # guild_id: {invite_code: uses}
 INVITE_TRACKER_CHANNEL = 1478778935746756739
 HANDLED_MESSAGES = set()
 HANDLED_MAX = 1000
+AI_COOLDOWN = {}
+AI_COOLDOWN_SECONDS = 30
 
 
 # ============================================================
@@ -502,6 +504,12 @@ async def on_message(message):
 
     # AI responses when bot is pinged
     if bot.user.mentioned_in(message) and not message.mention_everyone:
+        now = datetime.datetime.now()
+        user_id_ai = str(message.author.id)
+        if user_id_ai in AI_COOLDOWN:
+            if (now - AI_COOLDOWN[user_id_ai]).total_seconds() < AI_COOLDOWN_SECONDS:
+                return
+        AI_COOLDOWN[user_id_ai] = now
         # Remove the bot mention from the message to get the actual text
         clean_msg = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if clean_msg:
