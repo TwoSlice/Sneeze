@@ -9,6 +9,8 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 import aiohttp as _aiohttp
 from dotenv import load_dotenv
+from threading import Thread
+from flask import Flask
 
 load_dotenv()
 
@@ -1529,5 +1531,17 @@ async def on_command_error(ctx, error):
 import atexit
 atexit.register(force_save_levels)
 atexit.register(force_save_markov)
+
+# Keep-alive web server for UptimeRobot
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Sneeze is alive"
+
+def run_web():
+    app.run(host="0.0.0.0", port=8080)
+
+Thread(target=run_web, daemon=True).start()
 
 bot.run(os.getenv("DISCORD_TOKEN"))
